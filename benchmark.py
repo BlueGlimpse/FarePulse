@@ -32,7 +32,7 @@ def extract_anonymized_metrics(raw_json):
             continue
 
         # Build physical flight key (ignores airline/codeshare brand)
-        first_leg = legs[0]
+        first_leg = legs
         last_leg = legs[-1]
         dep_time = first_leg.get("departure_airport", {}).get("time", "")
         arr_time = last_leg.get("arrival_airport", {}).get("time", "")
@@ -67,7 +67,7 @@ def query_provider(provider_name, run_ts):
     start_time = time.perf_counter()
 
     if provider_name == "serpapi":
-        url = "https://serpapi.com/search.json"
+        url = "https://serpapi.com"
         params = {
             "engine": "google_flights",
             "departure_id": ORIGIN,
@@ -90,8 +90,6 @@ def query_provider(provider_name, run_ts):
             "outbound_date": DEPART_DATE,
             "return_date": RETURN_DATE,
             "flight_type": "round_trip",
-            "show_hidden_flights": "true",
-            "expanded_search": "true",
             "currency": "USD",
             "gl": "us",
             "hl": "en",
