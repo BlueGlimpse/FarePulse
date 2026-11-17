@@ -67,7 +67,7 @@ def query_provider(provider_name, run_ts):
     start_time = time.perf_counter()
 
     if provider_name == "serpapi":
-        url = "https://serpapi.com/search.json"
+        url = "https://serpapi.com"
         params = {
             "engine": "google_flights",
             "departure_id": ORIGIN,
@@ -75,6 +75,7 @@ def query_provider(provider_name, run_ts):
             "outbound_date": DEPART_DATE,
             "return_date": RETURN_DATE,
             "type": "1",
+            "show_hidden": "true",
             "exclude_basic": "true",
             "currency": "USD",
             "gl": "us",
@@ -82,7 +83,7 @@ def query_provider(provider_name, run_ts):
             "api_key": SERPAPI_KEY,
         }
     else:
-        url = "https://www.searchapi.io/api/v1/search"
+        url = "https://searchapi.io"
         params = {
             "engine": "google_flights",
             "departure_id": ORIGIN,
@@ -90,6 +91,8 @@ def query_provider(provider_name, run_ts):
             "outbound_date": DEPART_DATE,
             "return_date": RETURN_DATE,
             "flight_type": "round_trip",
+            "show_hidden_flights": "true",
+            "expanded_search": "true",
             "exclude_basic_economy": "true",
             "currency": "USD",
             "gl": "us",
