@@ -32,7 +32,7 @@ def extract_anonymized_metrics(raw_json):
             continue
 
         # Build physical flight key (ignores airline/codeshare brand)
-        first_leg = legs
+        first_leg = legs[0]
         last_leg = legs[-1]
         dep_time = first_leg.get("departure_airport", {}).get("time", "")
         arr_time = last_leg.get("arrival_airport", {}).get("time", "")
@@ -65,13 +65,10 @@ def extract_anonymized_metrics(raw_json):
 
 def query_provider(provider_name, run_ts):
     start_time = time.perf_counter()
-    headers = {
-        "Accept": "application/json",
-        "User-Agent": "FarePulse-Benchmark/1.0"
-    }
+    headers = {"Accept": "application/json"}
 
     if provider_name == "serpapi":
-        url = "https://serpapi.com"
+        url = "https://serpapi.com" + "/search.json"
         params = {
             "engine": "google_flights",
             "departure_id": ORIGIN,
@@ -86,7 +83,7 @@ def query_provider(provider_name, run_ts):
             "api_key": SERPAPI_KEY,
         }
     else:
-        url = "https://searchapi.io"
+        url = "https://searchapi.io" + "/api/v1/search"
         params = {
             "engine": "google_flights",
             "departure_id": ORIGIN,
@@ -105,14 +102,7 @@ def query_provider(provider_name, run_ts):
         elapsed_ms = int((time.perf_counter() - start_time) * 1000)
         resp.raise_for_status()
 
-        if not resp.text or not resp.text.strip():
-            raise ValueError(f"Empty body (HTTP {resp.status_code})")
-
-        try:
-            payload = resp.json()
-        except Exception:
-            raise ValueError(f"Non-JSON response (HTTP {resp.status_code}): {resp.text[:150]}")
-
+        payload = resp.json()
         metrics = extract_anonymized_metrics(payload)
 
         if not metrics:
@@ -130,6 +120,8 @@ def query_provider(provider_name, run_ts):
         }
     except Exception as exc:
         elapsed_ms = int((time.perf_counter() - start_time) * 1000)
+        # Strip any api_key from error logs for security
+        clean_error = str(exc).split("api_key=")[0]
         row = {
             "run_timestamp": run_ts,
             "provider": provider_name,
@@ -138,7 +130,7 @@ def query_provider(provider_name, run_ts):
             "return_date": RETURN_DATE,
             "response_time_ms": elapsed_ms,
             "status": "error",
-            "error_message": str(exc),
+            "error_message": clean_error,
         }
 
     supabase.table("api_benchmark_logs").insert(row).execute()
