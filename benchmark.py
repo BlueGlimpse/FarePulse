@@ -6,10 +6,10 @@ import requests
 from supabase import create_client
 
 # Load credentials from environment variables
-SERPAPI_KEY = os.environ["SERPAPI_KEY"]
-SEARCHAPI_KEY = os.environ["SEARCHAPI_KEY"]
-SUPABASE_URL = os.environ["SUPABASE_URL"]
-SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
+SERPAPI_KEY = os.environ["SERPAPI_KEY"].strip()
+SEARCHAPI_KEY = os.environ["SEARCHAPI_KEY"].strip()
+SUPABASE_URL = os.environ["SUPABASE_URL"].strip()
+SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"].strip()
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
@@ -65,6 +65,10 @@ def extract_anonymized_metrics(raw_json):
 
 def query_provider(provider_name, run_ts):
     start_time = time.perf_counter()
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "FarePulse-Benchmark/1.0"
+    }
 
     if provider_name == "serpapi":
         url = "https://serpapi.com"
@@ -97,7 +101,7 @@ def query_provider(provider_name, run_ts):
         }
 
     try:
-        resp = requests.get(url, params=params, timeout=45)
+        resp = requests.get(url, params=params, headers=headers, timeout=45)
         elapsed_ms = int((time.perf_counter() - start_time) * 1000)
         resp.raise_for_status()
 
@@ -112,7 +116,7 @@ def query_provider(provider_name, run_ts):
         metrics = extract_anonymized_metrics(payload)
 
         if not metrics:
-            raise ValueError("No flight prices returned in JSON payload.")
+            raise ValueError(f"No flight prices in JSON. Keys: {list(payload.keys())}")
 
         row = {
             "run_timestamp": run_ts,
