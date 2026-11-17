@@ -67,7 +67,7 @@ def query_provider(provider_name, run_ts):
     start_time = time.perf_counter()
 
     if provider_name == "serpapi":
-        url = "https://serpapi.com"
+        url = "https://serpapi.com/search.json"
         params = {
             "engine": "google_flights",
             "departure_id": ORIGIN,
@@ -76,7 +76,6 @@ def query_provider(provider_name, run_ts):
             "return_date": RETURN_DATE,
             "type": "1",
             "show_hidden": "true",
-            "exclude_basic": "true",
             "currency": "USD",
             "gl": "us",
             "hl": "en",
@@ -93,7 +92,6 @@ def query_provider(provider_name, run_ts):
             "flight_type": "round_trip",
             "show_hidden_flights": "true",
             "expanded_search": "true",
-            "exclude_basic_economy": "true",
             "currency": "USD",
             "gl": "us",
             "hl": "en",
@@ -101,10 +99,19 @@ def query_provider(provider_name, run_ts):
         }
 
     try:
-        resp = requests.get(url, params=params, timeout=30)
+        resp = requests.get(url, params=params, timeout=45)
         elapsed_ms = int((time.perf_counter() - start_time) * 1000)
         resp.raise_for_status()
-        metrics = extract_anonymized_metrics(resp.json())
+
+        if not resp.text or not resp.text.strip():
+            raise ValueError(f"Empty body (HTTP {resp.status_code})")
+
+        try:
+            payload = resp.json()
+        except Exception:
+            raise ValueError(f"Non-JSON response (HTTP {resp.status_code}): {resp.text[:150]}")
+
+        metrics = extract_anonymized_metrics(payload)
 
         if not metrics:
             raise ValueError("No flight prices returned in JSON payload.")
@@ -133,7 +140,7 @@ def query_provider(provider_name, run_ts):
         }
 
     supabase.table("api_benchmark_logs").insert(row).execute()
-    print(f"[{provider_name.upper()}] {row['status']} in {elapsed_ms}ms -> {row.get('median_price')}")
+    print(f"[{provider_name.upper()}] {row['status']} in {elapsed_ms}ms -> {row.get('median_price') or row.get('error_message')}")
 
 
 if __name__ == "__main__":
