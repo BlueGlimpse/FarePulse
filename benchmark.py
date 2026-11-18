@@ -5,10 +5,10 @@ from datetime import datetime, timezone
 import requests
 from supabase import create_client
 
-SERPAPI_KEY = os.environ["SERPAPI_KEY"].strip()
-SEARCHAPI_KEY = os.environ["SEARCHAPI_KEY"].strip()
-SUPABASE_URL = os.environ["SUPABASE_URL"].strip()
-SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"].strip()
+SERPAPI_KEY = os.environ.get("SERPAPI_KEY", "").strip()
+SEARCHAPI_KEY = os.environ.get("SEARCHAPI_KEY", "").strip()
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "").strip()
+SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "").strip()
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
@@ -28,16 +28,17 @@ def normalize_time(raw_time_str):
         except ValueError:
             pass
     if " " in raw_time_str:
-        return raw_time_str.split(" ")[-1][:5]
+        parts = raw_time_str.split(" ")
+        return parts[-1][:5]
     return raw_time_str[:5]
 
 
 def extract_all_safe_data(raw_json, provider_name, run_ts):
-    tagged_items = [
-        ("best_flights", item) for item in raw_json.get("best_flights", [])
-    ] + [
-        ("other_flights", item) for item in raw_json.get("other_flights", [])
-    ]
+    tagged_items = []
+    for item in raw_json.get("best_flights", []):
+        tagged_items.append(("best_flights", item))
+    for item in raw_json.get("other_flights", []):
+        tagged_items.append(("other_flights", item))
 
     unique_flights = {}
 
@@ -47,7 +48,7 @@ def extract_all_safe_data(raw_json, provider_name, run_ts):
         if not price or not legs:
             continue
 
-        first_leg = legs[0]
+        first_leg = next(iter(legs))
         last_leg = legs[-1]
         dep_time = normalize_time(first_leg.get("departure_airport", {}).get("time", ""))
         arr_time = normalize_time(last_leg.get("arrival_airport", {}).get("time", ""))
@@ -101,7 +102,6 @@ def extract_all_safe_data(raw_json, provider_name, run_ts):
                 "typical_route_carbon_grams": int(typical_carbon) if isinstance(typical_carbon, (int, float)) else None,
                 "carbon_diff_percent": round(float(diff_carbon), 2) if isinstance(diff_carbon, (int, float)) else None,
             }
-
     detail_rows = list(unique_flights.values())
     if not detail_rows:
         return None, []
@@ -117,16 +117,26 @@ def extract_all_safe_data(raw_json, provider_name, run_ts):
 
     if count >= 4:
         q_slices = statistics.quantiles(prices, n=4)
-        p25_val = q_slices[0]
+        p25_val = next(iter(q_slices))
         p75_val = q_slices[-1]
     else:
         p25_val = min(prices)
         p75_val = max(prices)
 
     insights = raw_json.get("price_insights", {})
-    typ_range = insights.get("typical_price_range", [])
-    typ_low = float(min(typ_range)) if typ_range else None
-    typ_high = float(max(typ_range)) if typ_range else None
+    typ_range = insights.get("typical_price_range")
+    typ_low = None
+    typ_high = None
+
+    if isinstance(typ_range, dict):
+        if isinstance(typ_range.get("low_price"), (int, float)):
+            typ_low = float(typ_range["low_price"])
+        if isinstance(typ_range.get("high_price"), (int, float)):
+            typ_high = float(typ_range["high_price"])
+    elif isinstance(typ_range, list) and len(typ_range) >= 2:
+        typ_low = float(min(typ_range))
+        typ_high = float(max(typ_range))
+
     history_points = len(insights.get("price_history", []))
 
     summary_metrics = {
@@ -218,7 +228,7 @@ def query_provider(provider_name, run_ts):
         }
     except Exception as exc:
         elapsed_ms = int((time.perf_counter() - start_time) * 1000)
-        clean_error = str(exc).split("api_key=")[0]
+        clean_error = next(iter(str(exc).split("api_key=")))
         row = {
             "run_timestamp": run_ts,
             "provider": provider_name,
