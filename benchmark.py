@@ -20,12 +20,17 @@ DEPART_DATE = "2027-03-13"
 RETURN_DATE = "2027-03-20"
 
 
-def extract_anonymized_metrics(raw_json):
-    """Combines flight lists, deduplicates codeshares, and strips airline names."""
-    all_itineraries = raw_json.get("best_flights", []) + raw_json.get("other_flights", [])
+def extract_flights_and_metrics(raw_json, provider_name, run_ts):
+    """Extracts anonymized individual flight lines and calculates summary stats."""
+    tagged_items = [
+        ("best_flights", item) for item in raw_json.get("best_flights", [])
+    ] + [
+        ("other_flights", item) for item in raw_json.get("other_flights", [])
+    ]
+
     unique_flights = {}
 
-    for item in all_itineraries:
+    for bucket, item in tagged_items:
         price = item.get("price")
         legs = item.get("flights", [])
         if not price or not legs:
@@ -42,25 +47,37 @@ def extract_anonymized_metrics(raw_json):
         flight_key = f"{dep_time}_{arr_time}_{total_duration}_{stops}"
 
         # Keep lowest price if same physical plane is listed under multiple codeshares
-        if flight_key not in unique_flights or price < unique_flights[flight_key]["price"]:
+        if flight_key not in unique_flights or float(price) < unique_flights[flight_key]["price"]:
             unique_flights[flight_key] = {
-                "price": float(price),
-                "is_nonstop": (stops == 0)
+                "run_timestamp": run_ts,
+                "provider": provider_name,
+                "route": f"{ORIGIN}-{DESTINATION}",
+                "depart_date": DEPART_DATE,
+                "return_date": RETURN_DATE,
+                "flight_bucket": bucket,
+                "departure_time": dep_time,
+                "arrival_time": arr_time,
+                "total_duration_min": total_duration,
+                "stops": stops,
+                "price": round(float(price), 2),
             }
 
-    prices = [f["price"] for f in unique_flights.values()]
-    nonstop_total = sum(1 for f in unique_flights.values() if f["is_nonstop"])
+    detail_rows = list(unique_flights.values())
+    if not detail_rows:
+        return None, []
 
-    if not prices:
-        return None
+    prices = [r["price"] for r in detail_rows]
+    nonstop_total = sum(1 for r in detail_rows if r["stops"] == 0)
 
-    return {
+    summary_metrics = {
         "unique_option_count": len(prices),
         "nonstop_count": nonstop_total,
         "lowest_price": round(min(prices), 2),
         "median_price": round(statistics.median(prices), 2),
         "average_price": round(statistics.mean(prices), 2),
     }
+
+    return summary_metrics, detail_rows
 
 
 def query_provider(provider_name, run_ts):
@@ -103,10 +120,13 @@ def query_provider(provider_name, run_ts):
         resp.raise_for_status()
 
         payload = resp.json()
-        metrics = extract_anonymized_metrics(payload)
+        metrics, detail_rows = extract_flights_and_metrics(payload, provider_name, run_ts)
 
         if not metrics:
             raise ValueError(f"No flight prices in JSON. Keys: {list(payload.keys())}")
+
+        # Insert detail lines first, then summary row
+        supabase.table("api_benchmark_details").insert(detail_rows).execute()
 
         row = {
             "run_timestamp": run_ts,
@@ -120,7 +140,6 @@ def query_provider(provider_name, run_ts):
         }
     except Exception as exc:
         elapsed_ms = int((time.perf_counter() - start_time) * 1000)
-        # Strip any api_key from error logs for security
         clean_error = str(exc).split("api_key=")[0]
         row = {
             "run_timestamp": run_ts,
