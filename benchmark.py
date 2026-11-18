@@ -20,64 +20,131 @@ DEPART_DATE = "2027-03-13"
 RETURN_DATE = "2027-03-20"
 
 
-def extract_flights_and_metrics(raw_json, provider_name, run_ts):
-    """Extracts anonymized individual flight lines and calculates summary stats."""
-    tagged_items = [
-        ("best_flights", item) for item in raw_json.get("best_flights", [])
-    ] + [
-        ("other_flights", item) for item in raw_json.get("other_flights", [])
-    ]
+def normalize_time(raw_time_str):
+    """Normalizes SerpApi ('2027-03-13 11:05') and SearchApi ('10:05:00 AM') to 'HH:MM'."""
+    if not raw_time_str:
+        return ""
+    raw_time_str = raw_time_str.strip()
+    for fmt in ("%I:%M:%S %p", "%I:%M %p"):
+        try:
+            return datetime.strptime(raw_time_str, fmt).strftime("%H:%M")
+        except ValueError:
+            pass
+    if " " in raw_time_str:
+        return raw_time_str.split(" ")[-1][:5]
+    return raw_time_str[:5]
 
+
+def extract_all_safe_metrics(raw_json):
+    """Extracts all safe carrier-agnostic fields and strips airline/trademark identifiers."""
+    all_itineraries = raw_json.get("best_flights", []) + raw_json.get("other_flights", [])
     unique_flights = {}
 
-    for bucket, item in tagged_items:
+    for item in all_itineraries:
         price = item.get("price")
         legs = item.get("flights", [])
         if not price or not legs:
             continue
 
-        # Build physical flight key (ignores airline/codeshare brand)
+        # Build physical flight key (ignores airline, logo, flight_number, airplane model)
         first_leg = legs[0]
         last_leg = legs[-1]
-        dep_time = first_leg.get("departure_airport", {}).get("time", "")
-        arr_time = last_leg.get("arrival_airport", {}).get("time", "")
-        total_duration = item.get("total_duration", 0)
+        dep_time = normalize_time(first_leg.get("departure_airport", {}).get("time", ""))
+        arr_time = normalize_time(last_leg.get("arrival_airport", {}).get("time", ""))
+        total_duration = int(item.get("total_duration", 0))
         stops = len(legs) - 1
 
         flight_key = f"{dep_time}_{arr_time}_{total_duration}_{stops}"
 
-        # Keep lowest price if same physical plane is listed under multiple codeshares
+        # Convert raw text extensions into safe booleans (discards raw trademarked strings)
+        raw_ext = " ".join(item.get("extensions", [])).lower()
+        leg_ext = " ".join(ext for leg in legs for ext in leg.get("extensions", [])).lower()
+        combined_notes = f"{raw_ext} {leg_ext}"
+
+        has_overnight = bool(
+            any(leg.get("overnight") for leg in legs)
+            or any(lay.get("overnight") for lay in item.get("layovers", []))
+        )
+        often_delayed = bool(any(leg.get("often_delayed_by_over_30_min") for leg in legs))
+
+        carryon_included = not (
+            "no carry-on" in combined_notes or "carry-on bag for a fee" in combined_notes
+        )
+        wifi_available = "wi-fi" in combined_notes
+        power_available = ("power" in combined_notes or "outlet" in combined_notes or "usb" in combined_notes)
+        video_available = ("video" in combined_notes or "entertainment" in combined_notes)
+
+        carbon_obj = item.get("carbon_emissions", {})
+        this_carbon = carbon_obj.get("this_flight")
+        typical_carbon = carbon_obj.get("typical_for_this_route")
+        diff_carbon = carbon_obj.get("difference_percent")
+
+        # Deduplicate codeshares by keeping lowest fare per physical schedule
         if flight_key not in unique_flights or float(price) < unique_flights[flight_key]["price"]:
             unique_flights[flight_key] = {
-                "run_timestamp": run_ts,
-                "provider": provider_name,
-                "route": f"{ORIGIN}-{DESTINATION}",
-                "depart_date": DEPART_DATE,
-                "return_date": RETURN_DATE,
-                "flight_bucket": bucket,
-                "departure_time": dep_time,
-                "arrival_time": arr_time,
-                "total_duration_min": total_duration,
-                "stops": stops,
-                "price": round(float(price), 2),
+                "price": float(price),
+                "is_nonstop": (stops == 0),
+                "duration": total_duration,
+                "has_overnight": has_overnight,
+                "often_delayed": often_delayed,
+                "carryon_included": carryon_included,
+                "wifi_available": wifi_available,
+                "power_available": power_available,
+                "video_available": video_available,
+                "this_carbon": this_carbon,
+                "typical_carbon": typical_carbon,
+                "diff_carbon": diff_carbon,
             }
 
-    detail_rows = list(unique_flights.values())
-    if not detail_rows:
-        return None, []
+    flights = list(unique_flights.values())
+    if not flights:
+        return None
 
-    prices = [r["price"] for r in detail_rows]
-    nonstop_total = sum(1 for r in detail_rows if r["stops"] == 0)
+    prices = sorted(f["price"] for f in flights)
+    count = len(flights)
+    nonstop_total = sum(1 for f in flights if f["is_nonstop"])
+    durations = [f["duration"] for f in flights if f["duration"] > 0]
 
-    summary_metrics = {
-        "unique_option_count": len(prices),
+    carbons = [f["this_carbon"] for f in flights if isinstance(f["this_carbon"], (int, float))]
+    typ_carbons = [f["typical_carbon"] for f in flights if isinstance(f["typical_carbon"], (int, float))]
+    diff_carbons = [f["diff_carbon"] for f in flights if isinstance(f["diff_carbon"], (int, float))]
+
+    # Quartile distribution
+    q_slices = statistics.quantiles(prices, n=4) if count >= 4 else [prices[0], statistics.median(prices), prices[-1]]
+
+    # Top-level Google price insights (carrier-agnostic)
+    insights = raw_json.get("price_insights", {})
+    typ_range = insights.get("typical_price_range", [])
+    typ_low = float(typ_range[0]) if len(typ_range) >= 1 else None
+    typ_high = float(typ_range[1]) if len(typ_range) >= 2 else None
+    history_points = len(insights.get("price_history", []))
+
+    return {
+        "unique_option_count": count,
         "nonstop_count": nonstop_total,
-        "lowest_price": round(min(prices), 2),
+        "connecting_count": count - nonstop_total,
+        "lowest_price": round(prices[0], 2),
+        "p25_price": round(q_slices[0], 2),
         "median_price": round(statistics.median(prices), 2),
         "average_price": round(statistics.mean(prices), 2),
+        "p75_price": round(q_slices[2], 2),
+        "highest_price": round(prices[-1], 2),
+        "google_price_level": insights.get("price_level"),
+        "google_typical_low": typ_low,
+        "google_typical_high": typ_high,
+        "google_history_points": history_points,
+        "avg_duration_min": int(round(statistics.mean(durations))) if durations else None,
+        "min_duration_min": min(durations) if durations else None,
+        "overnight_flight_share": round((sum(1 for f in flights if f["has_overnight"]) / count) * 100, 2),
+        "chronic_delay_share": round((sum(1 for f in flights if f["often_delayed"]) / count) * 100, 2),
+        "carryon_included_share": round((sum(1 for f in flights if f["carryon_included"]) / count) * 100, 2),
+        "wifi_available_share": round((sum(1 for f in flights if f["wifi_available"]) / count) * 100, 2),
+        "power_outlet_share": round((sum(1 for f in flights if f["power_available"]) / count) * 100, 2),
+        "on_demand_video_share": round((sum(1 for f in flights if f["video_available"]) / count) * 100, 2),
+        "avg_carbon_grams": int(round(statistics.mean(carbons))) if carbons else None,
+        "typical_route_carbon_grams": int(round(statistics.mean(typ_carbons))) if typ_carbons else None,
+        "avg_carbon_diff_percent": round(statistics.mean(diff_carbons), 2) if diff_carbons else None,
     }
-
-    return summary_metrics, detail_rows
 
 
 def query_provider(provider_name, run_ts):
@@ -120,13 +187,10 @@ def query_provider(provider_name, run_ts):
         resp.raise_for_status()
 
         payload = resp.json()
-        metrics, detail_rows = extract_flights_and_metrics(payload, provider_name, run_ts)
+        metrics = extract_all_safe_metrics(payload)
 
         if not metrics:
             raise ValueError(f"No flight prices in JSON. Keys: {list(payload.keys())}")
-
-        # Insert detail lines first, then summary row
-        supabase.table("api_benchmark_details").insert(detail_rows).execute()
 
         row = {
             "run_timestamp": run_ts,
@@ -153,7 +217,7 @@ def query_provider(provider_name, run_ts):
         }
 
     supabase.table("api_benchmark_logs").insert(row).execute()
-    print(f"[{provider_name.upper()}] {row['status']} in {elapsed_ms}ms -> {row.get('median_price') or row.get('error_message')}")
+    print(f"[{provider_name.upper()}] {row['status']} in {elapsed_ms}ms -> Median ${row.get('median_price')} | Level: {row.get('google_price_level')}")
 
 
 if __name__ == "__main__":
