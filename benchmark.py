@@ -55,24 +55,42 @@ def extract_all_safe_data(raw_json, provider_name, run_ts):
         total_duration = int(item.get("total_duration", 0))
         stops = len(legs) - 1
 
-        flight_key = f"{dep_time}_{arr_time}_{total_duration}_{stops}"
+        # Merge itinerary extensions, leg extensions, and structured baggage_prices
+        raw_ext = " ".join(str(x) for x in item.get("extensions", [])).lower()
+        leg_ext = " ".join(str(ext) for leg in legs for ext in leg.get("extensions", [])).lower()
+        bag_notes = str(item.get("baggage_prices", "")).lower()
+        combined_notes = f"{raw_ext} {leg_ext} {bag_notes}"
 
-        raw_ext = " ".join(item.get("extensions", [])).lower()
-        leg_ext = " ".join(ext for leg in legs for ext in leg.get("extensions", [])).lower()
-        combined_notes = f"{raw_ext} {leg_ext}"
+        # 1. Hardened carry-on check (catches both text notes and structured baggage fees)
+        carryon_excluded = any(
+            phrase in combined_notes
+            for phrase in ("no carry-on", "carry-on bag for a fee", "carry-on: $", "carry_on: $")
+        )
+        carryon_included = not carryon_excluded
 
+        # 2. Hardened amenity checks (removes negative phrases before matching positives)
+        cleaned_wifi_notes = combined_notes.replace("no wi-fi", "").replace("without wi-fi", "")
+        wifi_available = "wi-fi" in cleaned_wifi_notes
+        power_available = any(k in combined_notes for k in ("power", "outlet", "usb"))
+        video_available = any(k in combined_notes for k in ("video", "entertainment", "live tv"))
+
+        # 3. Hardened delay detection (booleans + text across both providers)
+        often_delayed = bool(
+            any(leg.get("often_delayed_by_over_30_min") or leg.get("often_delayed") for leg in legs)
+            or "often delayed" in combined_notes
+        )
+
+        # 4. Hardened overnight / red-eye detection (booleans + text + clock rollover)
+        clock_rollover = bool(dep_time and arr_time and arr_time < dep_time)
         has_overnight = bool(
             any(leg.get("overnight") for leg in legs)
             or any(lay.get("overnight") for lay in item.get("layovers", []))
+            or "overnight" in combined_notes
+            or clock_rollover
         )
-        often_delayed = bool(any(leg.get("often_delayed_by_over_30_min") for leg in legs))
 
-        carryon_included = not (
-            "no carry-on" in combined_notes or "carry-on bag for a fee" in combined_notes
-        )
-        wifi_available = "wi-fi" in combined_notes
-        power_available = ("power" in combined_notes or "outlet" in combined_notes or "usb" in combined_notes)
-        video_available = ("video" in combined_notes or "entertainment" in combined_notes)
+        # 5. Smart codeshare key (keeps distinct budget vs full-service planes separate)
+        flight_key = f"{dep_time}_{arr_time}_{total_duration}_{stops}_{carryon_included}_{wifi_available}"
 
         carbon_obj = item.get("carbon_emissions", {})
         this_carbon = carbon_obj.get("this_flight")
