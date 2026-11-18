@@ -35,12 +35,17 @@ def normalize_time(raw_time_str):
     return raw_time_str[:5]
 
 
-def extract_all_safe_metrics(raw_json):
-    """Extracts all safe carrier-agnostic fields and strips airline/trademark identifiers."""
-    all_itineraries = raw_json.get("best_flights", []) + raw_json.get("other_flights", [])
+def extract_all_safe_data(raw_json, provider_name, run_ts):
+    """Extracts anonymized flight details and aggregate metrics, stripping all carrier/trademark identifiers."""
+    tagged_items = [
+        ("best_flights", item) for item in raw_json.get("best_flights", [])
+    ] + [
+        ("other_flights", item) for item in raw_json.get("other_flights", [])
+    ]
+
     unique_flights = {}
 
-    for item in all_itineraries:
+    for bucket, item in tagged_items:
         price = item.get("price")
         legs = item.get("flights", [])
         if not price or not legs:
@@ -82,32 +87,40 @@ def extract_all_safe_metrics(raw_json):
         # Deduplicate codeshares by keeping lowest fare per physical schedule
         if flight_key not in unique_flights or float(price) < unique_flights[flight_key]["price"]:
             unique_flights[flight_key] = {
-                "price": float(price),
-                "is_nonstop": (stops == 0),
-                "duration": total_duration,
+                "run_timestamp": run_ts,
+                "provider": provider_name,
+                "route": f"{ORIGIN}-{DESTINATION}",
+                "depart_date": DEPART_DATE,
+                "return_date": RETURN_DATE,
+                "flight_bucket": bucket,
+                "departure_time": dep_time,
+                "arrival_time": arr_time,
+                "total_duration_min": total_duration,
+                "stops": stops,
+                "price": round(float(price), 2),
                 "has_overnight": has_overnight,
                 "often_delayed": often_delayed,
                 "carryon_included": carryon_included,
                 "wifi_available": wifi_available,
                 "power_available": power_available,
                 "video_available": video_available,
-                "this_carbon": this_carbon,
-                "typical_carbon": typical_carbon,
-                "diff_carbon": diff_carbon,
+                "carbon_grams": int(this_carbon) if isinstance(this_carbon, (int, float)) else None,
+                "typical_route_carbon_grams": int(typical_carbon) if isinstance(typical_carbon, (int, float)) else None,
+                "carbon_diff_percent": round(float(diff_carbon), 2) if isinstance(diff_carbon, (int, float)) else None,
             }
 
-    flights = list(unique_flights.values())
-    if not flights:
-        return None
+    detail_rows = list(unique_flights.values())
+    if not detail_rows:
+        return None, []
 
-    prices = sorted(f["price"] for f in flights)
-    count = len(flights)
-    nonstop_total = sum(1 for f in flights if f["is_nonstop"])
-    durations = [f["duration"] for f in flights if f["duration"] > 0]
+    prices = sorted(f["price"] for f in detail_rows)
+    count = len(detail_rows)
+    nonstop_total = sum(1 for f in detail_rows if f["stops"] == 0)
+    durations = [f["total_duration_min"] for f in detail_rows if f["total_duration_min"] > 0]
 
-    carbons = [f["this_carbon"] for f in flights if isinstance(f["this_carbon"], (int, float))]
-    typ_carbons = [f["typical_carbon"] for f in flights if isinstance(f["typical_carbon"], (int, float))]
-    diff_carbons = [f["diff_carbon"] for f in flights if isinstance(f["diff_carbon"], (int, float))]
+    carbons = [f["carbon_grams"] for f in detail_rows if f["carbon_grams"] is not None]
+    typ_carbons = [f["typical_route_carbon_grams"] for f in detail_rows if f["typical_route_carbon_grams"] is not None]
+    diff_carbons = [f["carbon_diff_percent"] for f in detail_rows if f["carbon_diff_percent"] is not None]
 
     # Quartile distribution
     q_slices = statistics.quantiles(prices, n=4) if count >= 4 else [prices[0], statistics.median(prices), prices[-1]]
@@ -119,7 +132,7 @@ def extract_all_safe_metrics(raw_json):
     typ_high = float(typ_range[1]) if len(typ_range) >= 2 else None
     history_points = len(insights.get("price_history", []))
 
-    return {
+    summary_metrics = {
         "unique_option_count": count,
         "nonstop_count": nonstop_total,
         "connecting_count": count - nonstop_total,
@@ -135,16 +148,18 @@ def extract_all_safe_metrics(raw_json):
         "google_history_points": history_points,
         "avg_duration_min": int(round(statistics.mean(durations))) if durations else None,
         "min_duration_min": min(durations) if durations else None,
-        "overnight_flight_share": round((sum(1 for f in flights if f["has_overnight"]) / count) * 100, 2),
-        "chronic_delay_share": round((sum(1 for f in flights if f["often_delayed"]) / count) * 100, 2),
-        "carryon_included_share": round((sum(1 for f in flights if f["carryon_included"]) / count) * 100, 2),
-        "wifi_available_share": round((sum(1 for f in flights if f["wifi_available"]) / count) * 100, 2),
-        "power_outlet_share": round((sum(1 for f in flights if f["power_available"]) / count) * 100, 2),
-        "on_demand_video_share": round((sum(1 for f in flights if f["video_available"]) / count) * 100, 2),
+        "overnight_flight_share": round((sum(1 for f in detail_rows if f["has_overnight"]) / count) * 100, 2),
+        "chronic_delay_share": round((sum(1 for f in detail_rows if f["often_delayed"]) / count) * 100, 2),
+        "carryon_included_share": round((sum(1 for f in detail_rows if f["carryon_included"]) / count) * 100, 2),
+        "wifi_available_share": round((sum(1 for f in detail_rows if f["wifi_available"]) / count) * 100, 2),
+        "power_outlet_share": round((sum(1 for f in detail_rows if f["power_available"]) / count) * 100, 2),
+        "on_demand_video_share": round((sum(1 for f in detail_rows if f["video_available"]) / count) * 100, 2),
         "avg_carbon_grams": int(round(statistics.mean(carbons))) if carbons else None,
         "typical_route_carbon_grams": int(round(statistics.mean(typ_carbons))) if typ_carbons else None,
         "avg_carbon_diff_percent": round(statistics.mean(diff_carbons), 2) if diff_carbons else None,
     }
+
+    return summary_metrics, detail_rows
 
 
 def query_provider(provider_name, run_ts):
@@ -187,10 +202,13 @@ def query_provider(provider_name, run_ts):
         resp.raise_for_status()
 
         payload = resp.json()
-        metrics = extract_all_safe_metrics(payload)
+        metrics, detail_rows = extract_all_safe_data(payload, provider_name, run_ts)
 
         if not metrics:
             raise ValueError(f"No flight prices in JSON. Keys: {list(payload.keys())}")
+
+        # Insert detail lines first, then summary row
+        supabase.table("api_benchmark_details").insert(detail_rows).execute()
 
         row = {
             "run_timestamp": run_ts,
@@ -212,15 +230,3 @@ def query_provider(provider_name, run_ts):
             "depart_date": DEPART_DATE,
             "return_date": RETURN_DATE,
             "response_time_ms": elapsed_ms,
-            "status": "error",
-            "error_message": clean_error,
-        }
-
-    supabase.table("api_benchmark_logs").insert(row).execute()
-    print(f"[{provider_name.upper()}] {row['status']} in {elapsed_ms}ms -> Median ${row.get('median_price')} | Level: {row.get('google_price_level')}")
-
-
-if __name__ == "__main__":
-    timestamp = datetime.now(timezone.utc).isoformat()
-    query_provider("serpapi", timestamp)
-    query_provider("searchapi", timestamp)
