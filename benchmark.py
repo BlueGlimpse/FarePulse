@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 import requests
 from supabase import create_client
 
-# Load credentials from environment variables
 SERPAPI_KEY = os.environ["SERPAPI_KEY"].strip()
 SEARCHAPI_KEY = os.environ["SEARCHAPI_KEY"].strip()
 SUPABASE_URL = os.environ["SUPABASE_URL"].strip()
@@ -13,7 +12,6 @@ SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"].strip()
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# Test route and 2027 dates
 ORIGIN = "ATL"
 DESTINATION = "MCO"
 DEPART_DATE = "2027-03-13"
@@ -21,7 +19,6 @@ RETURN_DATE = "2027-03-20"
 
 
 def normalize_time(raw_time_str):
-    """Normalizes SerpApi ('2027-03-13 11:05') and SearchApi ('10:05:00 AM') to 'HH:MM'."""
     if not raw_time_str:
         return ""
     raw_time_str = raw_time_str.strip()
@@ -36,7 +33,6 @@ def normalize_time(raw_time_str):
 
 
 def extract_all_safe_data(raw_json, provider_name, run_ts):
-    """Extracts anonymized flight details and aggregate metrics, stripping all carrier/trademark identifiers."""
     tagged_items = [
         ("best_flights", item) for item in raw_json.get("best_flights", [])
     ] + [
@@ -51,7 +47,6 @@ def extract_all_safe_data(raw_json, provider_name, run_ts):
         if not price or not legs:
             continue
 
-        # Build physical flight key (ignores airline, logo, flight_number, airplane model)
         first_leg = legs[0]
         last_leg = legs[-1]
         dep_time = normalize_time(first_leg.get("departure_airport", {}).get("time", ""))
@@ -61,7 +56,6 @@ def extract_all_safe_data(raw_json, provider_name, run_ts):
 
         flight_key = f"{dep_time}_{arr_time}_{total_duration}_{stops}"
 
-        # Convert raw text extensions into safe booleans (discards raw trademarked strings)
         raw_ext = " ".join(item.get("extensions", [])).lower()
         leg_ext = " ".join(ext for leg in legs for ext in leg.get("extensions", [])).lower()
         combined_notes = f"{raw_ext} {leg_ext}"
@@ -84,7 +78,6 @@ def extract_all_safe_data(raw_json, provider_name, run_ts):
         typical_carbon = carbon_obj.get("typical_for_this_route")
         diff_carbon = carbon_obj.get("difference_percent")
 
-        # Deduplicate codeshares by keeping lowest fare per physical schedule
         if flight_key not in unique_flights or float(price) < unique_flights[flight_key]["price"]:
             unique_flights[flight_key] = {
                 "run_timestamp": run_ts,
@@ -122,26 +115,30 @@ def extract_all_safe_data(raw_json, provider_name, run_ts):
     typ_carbons = [f["typical_route_carbon_grams"] for f in detail_rows if f["typical_route_carbon_grams"] is not None]
     diff_carbons = [f["carbon_diff_percent"] for f in detail_rows if f["carbon_diff_percent"] is not None]
 
-    # Quartile distribution
-    q_slices = statistics.quantiles(prices, n=4) if count >= 4 else [prices[0], statistics.median(prices), prices[-1]]
+    if count >= 4:
+        q_slices = statistics.quantiles(prices, n=4)
+        p25_val = q_slices[0]
+        p75_val = q_slices[-1]
+    else:
+        p25_val = min(prices)
+        p75_val = max(prices)
 
-    # Top-level Google price insights (carrier-agnostic)
     insights = raw_json.get("price_insights", {})
     typ_range = insights.get("typical_price_range", [])
-    typ_low = float(typ_range[0]) if len(typ_range) >= 1 else None
-    typ_high = float(typ_range[1]) if len(typ_range) >= 2 else None
+    typ_low = float(min(typ_range)) if typ_range else None
+    typ_high = float(max(typ_range)) if typ_range else None
     history_points = len(insights.get("price_history", []))
 
     summary_metrics = {
         "unique_option_count": count,
         "nonstop_count": nonstop_total,
         "connecting_count": count - nonstop_total,
-        "lowest_price": round(prices[0], 2),
-        "p25_price": round(q_slices[0], 2),
+        "lowest_price": round(min(prices), 2),
+        "p25_price": round(p25_val, 2),
         "median_price": round(statistics.median(prices), 2),
         "average_price": round(statistics.mean(prices), 2),
-        "p75_price": round(q_slices[2], 2),
-        "highest_price": round(prices[-1], 2),
+        "p75_price": round(p75_val, 2),
+        "highest_price": round(max(prices), 2),
         "google_price_level": insights.get("price_level"),
         "google_typical_low": typ_low,
         "google_typical_high": typ_high,
@@ -207,7 +204,6 @@ def query_provider(provider_name, run_ts):
         if not metrics:
             raise ValueError(f"No flight prices in JSON. Keys: {list(payload.keys())}")
 
-        # Insert detail lines first, then summary row
         supabase.table("api_benchmark_details").insert(detail_rows).execute()
 
         row = {
@@ -230,3 +226,15 @@ def query_provider(provider_name, run_ts):
             "depart_date": DEPART_DATE,
             "return_date": RETURN_DATE,
             "response_time_ms": elapsed_ms,
+            "status": "error",
+            "error_message": clean_error,
+        }
+
+    supabase.table("api_benchmark_logs").insert(row).execute()
+    print(f"[{provider_name.upper()}] {row['status']} in {elapsed_ms}ms -> Median ${row.get('median_price')} | Details: {row.get('unique_option_count', 0)}")
+
+
+if __name__ == "__main__":
+    timestamp = datetime.now(timezone.utc).isoformat()
+    query_provider("serpapi", timestamp)
+    query_provider("searchapi", timestamp)
