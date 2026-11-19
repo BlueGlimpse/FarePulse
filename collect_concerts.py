@@ -1,6 +1,6 @@
 import os
 import time
-from datetime import datetime, date, timezone
+from datetime import datetime, date, timedelta, timezone
 import requests
 from supabase import create_client
 
@@ -68,22 +68,25 @@ def parse_event_row(ev, dest_code, city_name, holiday_meta, run_ts):
 
 def collect_city_events(dest_code, city_name, holiday_meta, run_ts):
     dep_dt = date.fromisoformat(holiday_meta["depart_date"])
-    month_year = dep_dt.strftime("%B %Y")
-    query_text = f"Concerts in {city_name} {month_year}"
+    first_full_day = dep_dt + timedelta(days=1)
+    query_text = f"Concerts in {city_name} {first_full_day.strftime('%B %d %Y')}"
 
     url = "https://searchapi.io" + "/api/v1/search"
     headers = {"Accept": "application/json"}
     all_rows = []
+    next_token = None
 
-    for start_offset in (0, 10):
+    # Fetch up to 3 genuine pages (~30 concerts) using next_page_token
+    for page_num in range(3):
         params = {
             "engine": "google_events",
             "q": query_text,
-            "start": start_offset,
             "gl": "us",
             "hl": "en",
             "api_key": SEARCHAPI_KEY,
         }
+        if next_token:
+            params["next_page_token"] = next_token
 
         try:
             resp = requests.get(url, params=params, headers=headers, timeout=20)
@@ -96,19 +99,21 @@ def collect_city_events(dest_code, city_name, holiday_meta, run_ts):
                     all_rows.append(
                         parse_event_row(ev, dest_code, city_name, holiday_meta, run_ts)
                     )
-            if len(raw_events) < 10:
+
+            next_token = payload.get("pagination", {}).get("next_page_token")
+            if not next_token or not raw_events:
                 break
             time.sleep(0.5)
         except Exception as exc:
             clean_err = next(iter(str(exc).split("api_key=")))
-            print(f"[ERR] {holiday_meta['holiday_name']} | {city_name} (offset {start_offset}) -> {clean_err}")
+            print(f"[ERR] {holiday_meta['holiday_name']} | {city_name} (page {page_num + 1}) -> {clean_err}")
             break
 
     if all_rows:
         supabase.table("holiday_events_weekly").insert(all_rows).execute()
-        print(f"[OK] {holiday_meta['holiday_name']} | {city_name} ({month_year}) -> {len(all_rows)} concerts")
+        print(f"[OK] {holiday_meta['holiday_name']} | {city_name} ({first_full_day}) -> {len(all_rows)} concerts")
     else:
-        print(f"[EMPTY] {holiday_meta['holiday_name']} | {city_name} ({month_year}) -> 0 concerts")
+        print(f"[EMPTY] {holiday_meta['holiday_name']} | {city_name} ({first_full_day}) -> 0 concerts")
 
 
 if __name__ == "__main__":
