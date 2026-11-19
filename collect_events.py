@@ -65,10 +65,13 @@ def parse_event_row(ev, dest_code, city_name, holiday_meta, run_ts):
         "venue_reviews": venue_reviews_val,
     }
 
-
 def collect_city_events(dest_code, city_name, holiday_meta, run_ts):
-    month_year = date.fromisoformat(holiday_meta["depart_date"]).strftime("%B %Y")
-    query_text = f"Events in {city_name} {month_year}"
+    dep_dt = date.fromisoformat(holiday_meta["depart_date"])
+    clean_holiday = holiday_meta["holiday_name"].replace("2026", "").replace("2027", "").strip()
+    month_year = dep_dt.strftime("%B %Y")
+
+    # Targets holiday-week listings instead of filling page 1 with the 1st of the month
+    query_text = f"{clean_holiday} events in {city_name} {month_year}"
 
     url = "https://searchapi.io" + "/api/v1/search"
     headers = {"Accept": "application/json"}
@@ -79,6 +82,7 @@ def collect_city_events(dest_code, city_name, holiday_meta, run_ts):
         "hl": "en",
         "api_key": SEARCHAPI_KEY,
     }
+
 
     try:
         resp = requests.get(url, params=params, headers=headers, timeout=45)
