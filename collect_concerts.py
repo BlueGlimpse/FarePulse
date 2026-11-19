@@ -65,45 +65,50 @@ def parse_event_row(ev, dest_code, city_name, holiday_meta, run_ts):
         "venue_reviews": venue_reviews_val,
     }
 
+
 def collect_city_events(dest_code, city_name, holiday_meta, run_ts):
     dep_dt = date.fromisoformat(holiday_meta["depart_date"])
-    clean_holiday = holiday_meta["holiday_name"].replace("2026", "").replace("2027", "").strip()
     month_year = dep_dt.strftime("%B %Y")
-
-    # Targets holiday-week listings instead of filling page 1 with the 1st of the month
-    query_text = f"{clean_holiday} events in {city_name} {month_year}"
+    query_text = f"Concerts in {city_name} {month_year}"
 
     url = "https://searchapi.io" + "/api/v1/search"
     headers = {"Accept": "application/json"}
-    params = {
-        "engine": "google_events",
-        "q": query_text,
-        "gl": "us",
-        "hl": "en",
-        "api_key": SEARCHAPI_KEY,
-    }
+    all_rows = []
 
+    for start_offset in (0, 10):
+        params = {
+            "engine": "google_events",
+            "q": query_text,
+            "start": start_offset,
+            "gl": "us",
+            "hl": "en",
+            "api_key": SEARCHAPI_KEY,
+        }
 
-    try:
-        resp = requests.get(url, params=params, headers=headers, timeout=45)
-        resp.raise_for_status()
-        payload = resp.json()
+        try:
+            resp = requests.get(url, params=params, headers=headers, timeout=20)
+            resp.raise_for_status()
+            payload = resp.json()
 
-        raw_events = payload.get("events_results") or payload.get("events") or []
-        rows = [
-            parse_event_row(ev, dest_code, city_name, holiday_meta, run_ts)
-            for ev in raw_events
-            if isinstance(ev, dict) and ev.get("title")
-        ]
+            raw_events = payload.get("events_results") or payload.get("events") or []
+            for ev in raw_events:
+                if isinstance(ev, dict) and ev.get("title"):
+                    all_rows.append(
+                        parse_event_row(ev, dest_code, city_name, holiday_meta, run_ts)
+                    )
+            if len(raw_events) < 10:
+                break
+            time.sleep(0.5)
+        except Exception as exc:
+            clean_err = next(iter(str(exc).split("api_key=")))
+            print(f"[ERR] {holiday_meta['holiday_name']} | {city_name} (offset {start_offset}) -> {clean_err}")
+            break
 
-        if rows:
-            supabase.table("holiday_events_weekly").insert(rows).execute()
-            print(f"[OK] {holiday_meta['holiday_name']} | {city_name} ({month_year}) -> {len(rows)} events")
-        else:
-            print(f"[EMPTY] {holiday_meta['holiday_name']} | {city_name} -> Keys: {list(payload.keys())} | Err: {payload.get('error')}")
-    except Exception as exc:
-        clean_err = next(iter(str(exc).split("api_key=")))
-        print(f"[ERR] {holiday_meta['holiday_name']} | {city_name} -> {clean_err}")
+    if all_rows:
+        supabase.table("holiday_events_weekly").insert(all_rows).execute()
+        print(f"[OK] {holiday_meta['holiday_name']} | {city_name} ({month_year}) -> {len(all_rows)} concerts")
+    else:
+        print(f"[EMPTY] {holiday_meta['holiday_name']} | {city_name} ({month_year}) -> 0 concerts")
 
 
 if __name__ == "__main__":
@@ -127,4 +132,4 @@ if __name__ == "__main__":
         for h_meta in active_holidays:
             for dest_code, city_name in DESTINATIONS:
                 collect_city_events(dest_code, city_name, h_meta, run_timestamp)
-                time.sleep(1)
+                time.sleep(0.5)
