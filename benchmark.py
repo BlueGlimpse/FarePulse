@@ -38,116 +38,113 @@ def normalize_time(raw_time_str):
     return raw_time_str[:5]
 
 
-def extract_complete_inventory(raw_json, origin, destination, run_ts, slot_hr):
-    tagged_items = []
-    for item in raw_json.get("best_flights", []):
-        tagged_items.append(("best_flights", item))
-    for item in raw_json.get("other_flights", []):
-        tagged_items.append(("other_flights", item))
+def parse_item_to_detail(bucket, item, origin, destination, run_ts, slot_hr):
+    price = item.get("price")
+    legs = item.get("flights", [])
+    if price is None or not legs:
+        return None
 
+    first_leg = next(iter(legs))
+    last_leg = legs[-1]
+    dep_obj = first_leg.get("departure_airport", {})
+    arr_obj = last_leg.get("arrival_airport", {})
+
+    dep_time = normalize_time(dep_obj.get("time", ""))
+    arr_time = normalize_time(arr_obj.get("time", ""))
+    total_duration = int(item.get("total_duration", 0))
+    stops = len(legs) - 1
+
+    airlines = [str(leg.get("airline", "")).strip() for leg in legs if leg.get("airline")]
+    flight_nums = [str(leg.get("flight_number", "")).strip() for leg in legs if leg.get("flight_number")]
+    airplanes = [str(leg.get("airplane", "")).strip() for leg in legs if leg.get("airplane")]
+    cabins = [str(leg.get("travel_class", "")).strip() for leg in legs if leg.get("travel_class")]
+    legrooms = [str(leg.get("legroom", "")).strip() for leg in legs if leg.get("legroom")]
+
+    codeshares = []
+    for leg in legs:
+        also_sold = leg.get("ticket_also_sold_by", [])
+        if isinstance(also_sold, list):
+            codeshares.extend(str(c) for c in also_sold if c)
+
+    raw_ext = " ".join(str(x) for x in item.get("extensions", [])).lower()
+    leg_ext = " ".join(str(ext) for leg in legs for ext in leg.get("extensions", [])).lower()
+    bag_notes = str(item.get("baggage_prices", "")).lower()
+    combined_notes = f"{raw_ext} {leg_ext} {bag_notes}"
+
+    carryon_excluded = any(
+        phrase in combined_notes
+        for phrase in ("no carry-on", "carry-on bag for a fee", "carry-on: $", "carry_on: $")
+    )
+    cleaned_wifi = combined_notes.replace("no wi-fi", "").replace("without wi-fi", "")
+    clock_rollover = bool(dep_time and arr_time and arr_time < dep_time)
+
+    has_overnight = bool(
+        any(leg.get("overnight") for leg in legs)
+        or any(lay.get("overnight") for lay in item.get("layovers", []))
+        or "overnight" in combined_notes
+        or clock_rollover
+    )
+    often_delayed = bool(
+        any(leg.get("often_delayed_by_over_30_min") or leg.get("often_delayed") for leg in legs)
+        or "often delayed" in combined_notes
+    )
+
+    carbon_obj = item.get("carbon_emissions", {})
+    this_carbon = carbon_obj.get("this_flight")
+    typical_carbon = carbon_obj.get("typical_for_this_route")
+    diff_carbon = carbon_obj.get("difference_percent")
+
+    return {
+        "run_timestamp": run_ts,
+        "slot_hour": slot_hr,
+        "provider": "searchapi",
+        "route": f"{origin}-{destination}",
+        "origin": origin,
+        "destination": destination,
+        "depart_date": DEPART_DATE,
+        "return_date": RETURN_DATE,
+        "flight_bucket": bucket,
+        "trip_type": item.get("type"),
+        "price": round(float(price), 2),
+        "total_duration_min": total_duration,
+        "stops": stops,
+        "primary_airline": next(iter(airlines), None),
+        "all_airlines": " | ".join(dict.fromkeys(airlines)) if airlines else None,
+        "flight_numbers": " | ".join(flight_nums) if flight_nums else None,
+        "operating_carriers": " | ".join(dict.fromkeys(codeshares)) if codeshares else None,
+        "airplane_models": " | ".join(dict.fromkeys(airplanes)) if airplanes else None,
+        "travel_classes": " | ".join(dict.fromkeys(cabins)) if cabins else None,
+        "legroom_info": " | ".join(dict.fromkeys(legrooms)) if legrooms else None,
+        "departure_airport_code": dep_obj.get("id"),
+        "departure_airport_name": dep_obj.get("name"),
+        "departure_date": dep_obj.get("date", DEPART_DATE),
+        "departure_time": dep_time,
+        "arrival_airport_code": arr_obj.get("id"),
+        "arrival_airport_name": arr_obj.get("name"),
+        "arrival_date": arr_obj.get("date"),
+        "arrival_time": arr_time,
+        "has_overnight": has_overnight,
+        "often_delayed": often_delayed,
+        "carryon_included": not carryon_excluded,
+        "wifi_available": "wi-fi" in cleaned_wifi,
+        "power_available": any(k in combined_notes for k in ("power", "outlet", "usb")),
+        "video_available": any(k in combined_notes for k in ("video", "entertainment", "live tv")),
+        "carbon_grams": int(this_carbon) if isinstance(this_carbon, (int, float)) else None,
+        "typical_route_carbon_grams": int(typical_carbon) if isinstance(typical_carbon, (int, float)) else None,
+        "carbon_diff_percent": round(float(diff_carbon), 2) if isinstance(diff_carbon, (int, float)) else None,
+        "layovers_json": item.get("layovers"),
+        "baggage_prices_json": item.get("baggage_prices"),
+        "itinerary_extensions_json": item.get("extensions"),
+        "legs_full_json": legs,
+    }
+def build_summary_and_details(raw_json, origin, destination, run_ts, slot_hr):
     detail_rows = []
-    route_code = f"{origin}-{destination}"
+    for bucket in ("best_flights", "other_flights"):
+        for item in raw_json.get(bucket, []):
+            row = parse_item_to_detail(bucket, item, origin, destination, run_ts, slot_hr)
+            if row:
+                detail_rows.append(row)
 
-    for bucket, item in tagged_items:
-        price = item.get("price")
-        legs = item.get("flights", [])
-        if price is None or not legs:
-            continue
-
-        first_leg = next(iter(legs))
-        last_leg = legs[-1]
-
-        dep_obj = first_leg.get("departure_airport", {})
-        arr_obj = last_leg.get("arrival_airport", {})
-
-        dep_time = normalize_time(dep_obj.get("time", ""))
-        arr_time = normalize_time(arr_obj.get("time", ""))
-        total_duration = int(item.get("total_duration", 0))
-        stops = len(legs) - 1
-
-        airlines = [str(leg.get("airline", "")).strip() for leg in legs if leg.get("airline")]
-        flight_nums = [str(leg.get("flight_number", "")).strip() for leg in legs if leg.get("flight_number")]
-        airplanes = [str(leg.get("airplane", "")).strip() for leg in legs if leg.get("airplane")]
-        cabins = [str(leg.get("travel_class", "")).strip() for leg in legs if leg.get("travel_class")]
-        legrooms = [str(leg.get("legroom", "")).strip() for leg in legs if leg.get("legroom")]
-
-        codeshares = []
-        for leg in legs:
-            also_sold = leg.get("ticket_also_sold_by", [])
-            if isinstance(also_sold, list):
-                codeshares.extend(str(c) for c in also_sold if c)
-
-        raw_ext = " ".join(str(x) for x in item.get("extensions", [])).lower()
-        leg_ext = " ".join(str(ext) for leg in legs for ext in leg.get("extensions", [])).lower()
-        bag_notes = str(item.get("baggage_prices", "")).lower()
-        combined_notes = f"{raw_ext} {leg_ext} {bag_notes}"
-
-        carryon_excluded = any(
-            phrase in combined_notes
-            for phrase in ("no carry-on", "carry-on bag for a fee", "carry-on: $", "carry_on: $")
-        )
-        cleaned_wifi = combined_notes.replace("no wi-fi", "").replace("without wi-fi", "")
-
-        clock_rollover = bool(dep_time and arr_time and arr_time < dep_time)
-        has_overnight = bool(
-            any(leg.get("overnight") for leg in legs)
-            or any(lay.get("overnight") for lay in item.get("layovers", []))
-            or "overnight" in combined_notes
-            or clock_rollover
-        )
-        often_delayed = bool(
-            any(leg.get("often_delayed_by_over_30_min") or leg.get("often_delayed") for leg in legs)
-            or "often delayed" in combined_notes
-        )
-
-        carbon_obj = item.get("carbon_emissions", {})
-        this_carbon = carbon_obj.get("this_flight")
-        typical_carbon = carbon_obj.get("typical_for_this_route")
-        diff_carbon = carbon_obj.get("difference_percent")
-
-        detail_rows.append({
-            "run_timestamp": run_ts,
-            "slot_hour": slot_hr,
-            "provider": "searchapi",
-            "route": route_code,
-            "origin": origin,
-            "destination": destination,
-            "depart_date": DEPART_DATE,
-            "return_date": RETURN_DATE,
-            "flight_bucket": bucket,
-            "trip_type": item.get("type"),
-            "price": round(float(price), 2),
-            "total_duration_min": total_duration,
-            "stops": stops,
-            "primary_airline": next(iter(airlines), None),
-            "all_airlines": " | ".join(dict.fromkeys(airlines)) if airlines else None,
-            "flight_numbers": " | ".join(flight_nums) if flight_nums else None,
-            "operating_carriers": " | ".join(dict.fromkeys(codeshares)) if codeshares else None,
-            "airplane_models": " | ".join(dict.fromkeys(airplanes)) if airplanes else None,
-            "travel_classes": " | ".join(dict.fromkeys(cabins)) if cabins else None,
-            "legroom_info": " | ".join(dict.fromkeys(legrooms)) if legrooms else None,
-            "departure_airport_code": dep_obj.get("id"),
-            "departure_airport_name": dep_obj.get("name"),
-            "departure_date": dep_obj.get("date", DEPART_DATE),
-            "departure_time": dep_time,
-            "arrival_airport_code": arr_obj.get("id"),
-            "arrival_airport_name": arr_obj.get("name"),
-            "arrival_date": arr_obj.get("date"),
-            "arrival_time": arr_time,
-            "has_overnight": has_overnight,
-            "often_delayed": often_delayed,
-            "carryon_included": not carryon_excluded,
-            "wifi_available": "wi-fi" in cleaned_wifi,
-            "power_available": any(k in combined_notes for k in ("power", "outlet", "usb")),
-            "video_available": any(k in combined_notes for k in ("video", "entertainment", "live tv")),
-            "carbon_grams": int(this_carbon) if isinstance(this_carbon, (int, float)) else None,
-            "typical_route_carbon_grams": int(typical_carbon) if isinstance(typical_carbon, (int, float)) else None,
-            "carbon_diff_percent": round(float(diff_carbon), 2) if isinstance(diff_carbon, (int, float)) else None,
-            "layovers_json": item.get("layovers"),
-            "baggage_prices_json": item.get("baggage_prices"),
-            "itinerary_extensions_json": item.get("extensions"),
-            "legs_full_json": legs,
-        })
     if not detail_rows:
         return None, []
 
@@ -181,7 +178,7 @@ def extract_complete_inventory(raw_json, origin, destination, run_ts, slot_hr):
         "run_timestamp": run_ts,
         "slot_hour": slot_hr,
         "provider": "searchapi",
-        "route": route_code,
+        "route": f"{origin}-{destination}",
         "origin": origin,
         "destination": destination,
         "depart_date": DEPART_DATE,
@@ -202,7 +199,6 @@ def extract_complete_inventory(raw_json, origin, destination, run_ts, slot_hr):
         "airports_metadata": raw_json.get("airports"),
         "status": "success",
     }
-
     return summary_row, detail_rows
 
 
@@ -229,7 +225,7 @@ def collect_route(origin, destination, run_ts, slot_hr):
         resp.raise_for_status()
 
         payload = resp.json()
-        summary_row, detail_rows = extract_complete_inventory(
+        summary_row, detail_rows = build_summary_and_details(
             payload, origin, destination, run_ts, slot_hr
         )
 
