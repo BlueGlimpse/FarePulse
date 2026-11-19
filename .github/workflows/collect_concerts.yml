@@ -18,4 +18,4 @@ jobs:
           SEARCHAPI_KEY: ${{ secrets.SEARCHAPI_KEY }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-        run: python collect_events.py
+        run: python collect_concerts.py
