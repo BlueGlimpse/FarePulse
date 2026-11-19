@@ -1,7 +1,7 @@
 import os
 import time
 import statistics
-from datetime import datetime, timezone
+from datetime import datetime, date, timezone
 import requests
 from supabase import create_client
 
@@ -19,9 +19,6 @@ ROUTES = [
     ("LAX", "LAS"),
 ]
 
-DEPART_DATE = "2027-03-13"
-RETURN_DATE = "2027-03-20"
-
 
 def normalize_time(raw_time_str):
     if not raw_time_str:
@@ -38,7 +35,7 @@ def normalize_time(raw_time_str):
     return raw_time_str[:5]
 
 
-def parse_item_to_detail(bucket, item, origin, destination, run_ts, slot_hr):
+def parse_item_to_detail(bucket, item, origin, destination, holiday_meta, run_ts, slot_hr):
     price = item.get("price")
     legs = item.get("flights", [])
     if price is None or not legs:
@@ -98,11 +95,13 @@ def parse_item_to_detail(bucket, item, origin, destination, run_ts, slot_hr):
         "run_timestamp": run_ts,
         "slot_hour": slot_hr,
         "provider": "searchapi",
+        "holiday_name": holiday_meta["holiday_name"],
+        "days_out": holiday_meta["days_out"],
         "route": f"{origin}-{destination}",
         "origin": origin,
         "destination": destination,
-        "depart_date": DEPART_DATE,
-        "return_date": RETURN_DATE,
+        "depart_date": holiday_meta["depart_date"],
+        "return_date": holiday_meta["return_date"],
         "flight_bucket": bucket,
         "trip_type": item.get("type"),
         "price": round(float(price), 2),
@@ -117,7 +116,7 @@ def parse_item_to_detail(bucket, item, origin, destination, run_ts, slot_hr):
         "legroom_info": " | ".join(dict.fromkeys(legrooms)) if legrooms else None,
         "departure_airport_code": dep_obj.get("id"),
         "departure_airport_name": dep_obj.get("name"),
-        "departure_date": dep_obj.get("date", DEPART_DATE),
+        "departure_date": dep_obj.get("date", holiday_meta["depart_date"]),
         "departure_time": dep_time,
         "arrival_airport_code": arr_obj.get("id"),
         "arrival_airport_name": arr_obj.get("name"),
@@ -137,11 +136,11 @@ def parse_item_to_detail(bucket, item, origin, destination, run_ts, slot_hr):
         "itinerary_extensions_json": item.get("extensions"),
         "legs_full_json": legs,
     }
-def build_summary_and_details(raw_json, origin, destination, run_ts, slot_hr):
+def build_summary_and_details(raw_json, origin, destination, holiday_meta, run_ts, slot_hr):
     detail_rows = []
     for bucket in ("best_flights", "other_flights"):
         for item in raw_json.get(bucket, []):
-            row = parse_item_to_detail(bucket, item, origin, destination, run_ts, slot_hr)
+            row = parse_item_to_detail(bucket, item, origin, destination, holiday_meta, run_ts, slot_hr)
             if row:
                 detail_rows.append(row)
 
@@ -178,11 +177,13 @@ def build_summary_and_details(raw_json, origin, destination, run_ts, slot_hr):
         "run_timestamp": run_ts,
         "slot_hour": slot_hr,
         "provider": "searchapi",
+        "holiday_name": holiday_meta["holiday_name"],
+        "days_out": holiday_meta["days_out"],
         "route": f"{origin}-{destination}",
         "origin": origin,
         "destination": destination,
-        "depart_date": DEPART_DATE,
-        "return_date": RETURN_DATE,
+        "depart_date": holiday_meta["depart_date"],
+        "return_date": holiday_meta["return_date"],
         "total_options_found": count,
         "nonstop_count": nonstop_total,
         "connecting_count": count - nonstop_total,
@@ -202,7 +203,7 @@ def build_summary_and_details(raw_json, origin, destination, run_ts, slot_hr):
     return summary_row, detail_rows
 
 
-def collect_route(origin, destination, run_ts, slot_hr):
+def collect_route(origin, destination, holiday_meta, run_ts, slot_hr):
     start_time = time.perf_counter()
     url = "https://searchapi.io" + "/api/v1/search"
     headers = {"Accept": "application/json"}
@@ -210,8 +211,8 @@ def collect_route(origin, destination, run_ts, slot_hr):
         "engine": "google_flights",
         "departure_id": origin,
         "arrival_id": destination,
-        "outbound_date": DEPART_DATE,
-        "return_date": RETURN_DATE,
+        "outbound_date": holiday_meta["depart_date"],
+        "return_date": holiday_meta["return_date"],
         "flight_type": "round_trip",
         "currency": "USD",
         "gl": "us",
@@ -226,7 +227,7 @@ def collect_route(origin, destination, run_ts, slot_hr):
 
         payload = resp.json()
         summary_row, detail_rows = build_summary_and_details(
-            payload, origin, destination, run_ts, slot_hr
+            payload, origin, destination, holiday_meta, run_ts, slot_hr
         )
 
         if not summary_row:
@@ -236,7 +237,7 @@ def collect_route(origin, destination, run_ts, slot_hr):
         supabase.table("fare_details_hourly").insert(detail_rows).execute()
         supabase.table("fare_summary_hourly").insert(summary_row).execute()
 
-        print(f"[OK] {origin}-{destination} in {elapsed_ms}ms -> {len(detail_rows)} flights | Lowest ${summary_row['lowest_price']}")
+        print(f"[OK] {holiday_meta['holiday_name']} (T-{holiday_meta['days_out']}) | {origin}-{destination} -> Lowest ${summary_row['lowest_price']}")
     except Exception as exc:
         elapsed_ms = int((time.perf_counter() - start_time) * 1000)
         clean_err = next(iter(str(exc).split("api_key=")))
@@ -244,24 +245,41 @@ def collect_route(origin, destination, run_ts, slot_hr):
             "run_timestamp": run_ts,
             "slot_hour": slot_hr,
             "provider": "searchapi",
+            "holiday_name": holiday_meta["holiday_name"],
+            "days_out": holiday_meta["days_out"],
             "route": f"{origin}-{destination}",
             "origin": origin,
             "destination": destination,
-            "depart_date": DEPART_DATE,
-            "return_date": RETURN_DATE,
+            "depart_date": holiday_meta["depart_date"],
+            "return_date": holiday_meta["return_date"],
             "response_time_ms": elapsed_ms,
             "status": "error",
             "error_message": clean_err,
         }
         supabase.table("fare_summary_hourly").insert(err_row).execute()
-        print(f"[ERR] {origin}-{destination} in {elapsed_ms}ms -> {clean_err}")
+        print(f"[ERR] {holiday_meta['holiday_name']} | {origin}-{destination} -> {clean_err}")
 
 
 if __name__ == "__main__":
     now_utc = datetime.now(timezone.utc)
+    today_utc = now_utc.date()
     run_timestamp = now_utc.isoformat()
     slot_hour = now_utc.replace(minute=0, second=0, microsecond=0).isoformat()
 
-    for orig, dest in ROUTES:
-        collect_route(orig, dest, run_timestamp, slot_hour)
-        time.sleep(1)
+    windows = supabase.table("holiday_windows").select("*").eq("is_active", True).execute().data
+
+    active_holidays = []
+    for win in windows:
+        dep_dt = date.fromisoformat(win["depart_date"])
+        days_out = (dep_dt - today_utc).days
+        if 0 <= days_out <= win["lead_days_start"]:
+            win["days_out"] = days_out
+            active_holidays.append(win)
+
+    if not active_holidays:
+        print(f"[IDLE] No holidays inside T-120 to T-0 window on {today_utc}.")
+    else:
+        for h_meta in active_holidays:
+            for orig, dest in ROUTES:
+                collect_route(orig, dest, h_meta, run_timestamp, slot_hour)
+                time.sleep(1)
