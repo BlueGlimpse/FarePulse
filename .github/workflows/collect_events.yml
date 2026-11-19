@@ -1,0 +1,21 @@
+name: SearchApi Weekly Holiday Events Collector
+
+on:
+  schedule:
+    - cron: '15 8 * * 1'  # Runs once a week on Mondays at 08:15 UTC
+  workflow_dispatch:       # Allows manual testing anytime
+
+jobs:
+  collect-events:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install requests supabase
+      - env:
+          SEARCHAPI_KEY: ${{ secrets.SEARCHAPI_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python collect_events.py
