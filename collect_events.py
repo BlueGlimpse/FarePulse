@@ -11,17 +11,12 @@ SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "").strip()
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 DESTINATIONS = [
-    ("MCO", "Orlando, FL"),
-    ("DEN", "Denver, CO"),
-    ("HNL", "Honolulu, HI"),
-    ("CUN", "Cancun, Mexico"),
-    ("LAS", "Las Vegas, NV"),
+    ("MCO", "Orlando, FL", "Orlando,Florida,United States"),
+    ("DEN", "Denver, CO", "Denver,Colorado,United States"),
+    ("HNL", "Honolulu, HI", "Honolulu,Hawaii,United States"),
+    ("CUN", "Cancun, Mexico", "Cancun,Quintana Roo,Mexico"),
+    ("LAS", "Las Vegas, NV", "Las Vegas,Nevada,United States"),
 ]
-
-
-def format_date_phrase(iso_date_str):
-    dt = date.fromisoformat(iso_date_str)
-    return dt.strftime("%B %d %Y")
 
 
 def parse_event_row(ev, dest_code, city_name, holiday_meta, run_ts):
@@ -50,16 +45,18 @@ def parse_event_row(ev, dest_code, city_name, holiday_meta, run_ts):
         "venue_rating": venue_obj.get("rating"),
         "venue_reviews": venue_obj.get("reviews"),
     }
-def collect_city_events(dest_code, city_name, holiday_meta, run_ts):
-    start_str = format_date_phrase(holiday_meta["depart_date"])
-    end_str = format_date_phrase(holiday_meta["return_date"])
-    query_text = f"Events in {city_name} from {start_str} to {end_str}"
 
-    url = "https://www.searchapi.io" + "/api/v1/search"
+
+def collect_city_events(dest_code, city_name, location_anchor, holiday_meta, run_ts):
+    month_year = date.fromisoformat(holiday_meta["depart_date"]).strftime("%B %Y")
+    query_text = f"Events in {city_name} {month_year}"
+
+    url = "https://searchapi.io" + "/api/v1/search"
     headers = {"Accept": "application/json"}
     params = {
         "engine": "google_events",
         "q": query_text,
+        "location": location_anchor,
         "hl": "en",
         "api_key": SEARCHAPI_KEY,
     }
@@ -78,9 +75,9 @@ def collect_city_events(dest_code, city_name, holiday_meta, run_ts):
 
         if rows:
             supabase.table("holiday_events_weekly").insert(rows).execute()
-            print(f"[OK] {holiday_meta['holiday_name']} (T-{holiday_meta['days_out']}) | {city_name} -> {len(rows)} events")
+            print(f"[OK] {holiday_meta['holiday_name']} | {city_name} ({month_year}) -> {len(rows)} events")
         else:
-            print(f"[EMPTY] {holiday_meta['holiday_name']} | {city_name} -> 0 events returned")
+            print(f"[EMPTY] {holiday_meta['holiday_name']} | {city_name} ({month_year}) -> 0 events. Keys: {list(payload.keys())}")
     except Exception as exc:
         clean_err = next(iter(str(exc).split("api_key=")))
         print(f"[ERR] {holiday_meta['holiday_name']} | {city_name} -> {clean_err}")
@@ -105,6 +102,6 @@ if __name__ == "__main__":
         print(f"[IDLE] No holidays inside T-120 to T-0 window on {today_utc}.")
     else:
         for h_meta in active_holidays:
-            for dest_code, city_name in DESTINATIONS:
-                collect_city_events(dest_code, city_name, h_meta, run_timestamp)
+            for dest_code, city_name, loc_anchor in DESTINATIONS:
+                collect_city_events(dest_code, city_name, loc_anchor, h_meta, run_timestamp)
                 time.sleep(1)
