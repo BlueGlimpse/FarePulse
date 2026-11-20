@@ -66,61 +66,41 @@ def parse_event_row(ev, dest_code, city_name, holiday_meta, run_ts):
     }
 
 
-def collect_city_events(dest_code, city_name, holiday_meta, run_ts):
-    days_out = holiday_meta["days_out"]
-    query_text = f"Concerts in {city_name}"
-
-    # Use SearchApi's native Google Events date chips when within 35 days
-    date_chip = None
-    if days_out <= 14:
-        date_chip = "date:next_week"
-    elif days_out <= 35:
-        date_chip = "date:month"
+def collect_city_concerts(dest_code, city_name, holiday_meta, run_ts):
+    dep_dt = date.fromisoformat(holiday_meta["depart_date"])
+    month_year = dep_dt.strftime("%B %Y")
+    query_text = f"Concerts in {city_name} {month_year}"
 
     url = "https://searchapi.io" + "/api/v1/search"
     headers = {"Accept": "application/json"}
-    all_rows = []
-    next_token = None
+    params = {
+        "engine": "google",
+        "q": query_text,
+        "gl": "us",
+        "hl": "en",
+        "api_key": SEARCHAPI_KEY,
+    }
 
-    for page_num in range(3):
-        params = {
-            "engine": "google_events",
-            "q": query_text,
-            "gl": "us",
-            "hl": "en",
-            "api_key": SEARCHAPI_KEY,
-        }
-        if date_chip:
-            params["chips"] = date_chip
-        if next_token:
-            params["next_page_token"] = next_token
+    try:
+        resp = requests.get(url, params=params, headers=headers, timeout=20)
+        resp.raise_for_status()
+        payload = resp.json()
 
-        try:
-            resp = requests.get(url, params=params, headers=headers, timeout=20)
-            resp.raise_for_status()
-            payload = resp.json()
+        raw_events = payload.get("events_results") or payload.get("events") or []
+        rows = [
+            parse_event_row(ev, dest_code, city_name, holiday_meta, run_ts)
+            for ev in raw_events
+            if isinstance(ev, dict) and ev.get("title")
+        ]
 
-            raw_events = payload.get("events_results") or payload.get("events") or []
-            for ev in raw_events:
-                if isinstance(ev, dict) and ev.get("title"):
-                    all_rows.append(
-                        parse_event_row(ev, dest_code, city_name, holiday_meta, run_ts)
-                    )
-
-            next_token = payload.get("pagination", {}).get("next_page_token")
-            if not next_token or not raw_events:
-                break
-            time.sleep(0.5)
-        except Exception as exc:
-            clean_err = next(iter(str(exc).split("api_key=")))
-            print(f"[ERR] {holiday_meta['holiday_name']} | {city_name} (page {page_num + 1}) -> {clean_err}")
-            break
-
-    if all_rows:
-        supabase.table("holiday_events_weekly").insert(all_rows).execute()
-        print(f"[OK] {holiday_meta['holiday_name']} | {city_name} (chip={date_chip}) -> {len(all_rows)} concerts")
-    else:
-        print(f"[EMPTY] {holiday_meta['holiday_name']} | {city_name} (chip={date_chip}) -> 0 concerts")
+        if rows:
+            supabase.table("holiday_events_weekly").insert(rows).execute()
+            print(f"[OK] {holiday_meta['holiday_name']} | {city_name} ({month_year}) -> {len(rows)} headliners")
+        else:
+            print(f"[EMPTY] {holiday_meta['holiday_name']} | {city_name} ({month_year}) -> 0 events_results")
+    except Exception as exc:
+        clean_err = next(iter(str(exc).split("api_key=")))
+        print(f"[ERR] {holiday_meta['holiday_name']} | {city_name} -> {clean_err}")
 
 
 if __name__ == "__main__":
@@ -143,5 +123,5 @@ if __name__ == "__main__":
     else:
         for h_meta in active_holidays:
             for dest_code, city_name in DESTINATIONS:
-                collect_city_events(dest_code, city_name, h_meta, run_timestamp)
+                collect_city_concerts(dest_code, city_name, h_meta, run_timestamp)
                 time.sleep(0.5)
