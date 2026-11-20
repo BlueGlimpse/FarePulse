@@ -1,6 +1,6 @@
 import os
 import time
-from datetime import datetime, date, timedelta, timezone
+from datetime import datetime, date, timezone
 import requests
 from supabase import create_client
 
@@ -67,16 +67,21 @@ def parse_event_row(ev, dest_code, city_name, holiday_meta, run_ts):
 
 
 def collect_city_events(dest_code, city_name, holiday_meta, run_ts):
-    dep_dt = date.fromisoformat(holiday_meta["depart_date"])
-    first_full_day = dep_dt + timedelta(days=1)
-    query_text = f"Concerts in {city_name} {first_full_day.strftime('%B %d %Y')}"
+    days_out = holiday_meta["days_out"]
+    query_text = f"Concerts in {city_name}"
+
+    # Use SearchApi's native Google Events date chips when within 35 days
+    date_chip = None
+    if days_out <= 14:
+        date_chip = "date:next_week"
+    elif days_out <= 35:
+        date_chip = "date:month"
 
     url = "https://searchapi.io" + "/api/v1/search"
     headers = {"Accept": "application/json"}
     all_rows = []
     next_token = None
 
-    # Fetch up to 3 genuine pages (~30 concerts) using next_page_token
     for page_num in range(3):
         params = {
             "engine": "google_events",
@@ -85,6 +90,8 @@ def collect_city_events(dest_code, city_name, holiday_meta, run_ts):
             "hl": "en",
             "api_key": SEARCHAPI_KEY,
         }
+        if date_chip:
+            params["chips"] = date_chip
         if next_token:
             params["next_page_token"] = next_token
 
@@ -111,9 +118,9 @@ def collect_city_events(dest_code, city_name, holiday_meta, run_ts):
 
     if all_rows:
         supabase.table("holiday_events_weekly").insert(all_rows).execute()
-        print(f"[OK] {holiday_meta['holiday_name']} | {city_name} ({first_full_day}) -> {len(all_rows)} concerts")
+        print(f"[OK] {holiday_meta['holiday_name']} | {city_name} (chip={date_chip}) -> {len(all_rows)} concerts")
     else:
-        print(f"[EMPTY] {holiday_meta['holiday_name']} | {city_name} ({first_full_day}) -> 0 concerts")
+        print(f"[EMPTY] {holiday_meta['holiday_name']} | {city_name} (chip={date_chip}) -> 0 concerts")
 
 
 if __name__ == "__main__":
