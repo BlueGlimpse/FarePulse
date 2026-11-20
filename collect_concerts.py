@@ -74,7 +74,7 @@ def collect_city_concerts(dest_code, city_name, holiday_meta, run_ts):
     url = "https://searchapi.io" + "/api/v1/search"
     headers = {"Accept": "application/json"}
     params = {
-        "engine": "google",
+        "engine": "google_events",
         "q": query_text,
         "gl": "us",
         "hl": "en",
